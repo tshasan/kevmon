@@ -1,148 +1,142 @@
-"""Does poke-engine agree with Showdown about what actually happens?
+"""Does poke-engine agree with Showdown about how much damage a turn deals?
 
-poke-engine is a separate reimplementation of the battle rules. A search over an engine that disagrees with the
-server produces confident nonsense, so this number gates every result built on top of it.
+A search over an engine that disagrees with the server produces confident nonsense, so this gates everything.
 
-Method: self-play, so we control both players and can read each side's true team off its own `Player` object -- no
-sampling, no hidden information, nothing to confound the rules comparison. Each turn we snapshot the engine state
-and both chosen moves; once the turn resolves we ask the engine, via `generate_instructions`, for every outcome it
-thought possible, and check whether what Showdown actually did is among them.
+Three things about the engine's Python API shape this harness, all learned by hand-tracing single turns first
+(experiments/trace_turn.py) after aggregate statistics proved useless:
 
-"Among them" is the right question rather than exact equality: damage rolls are random (85-100%), so the engine
-returns a probability-weighted set of outcomes. Agreement means Showdown's result was in that set. A miss means the
-two implementations genuinely disagree about the rules.
+  1. `apply_instructions` does NOT mutate the Python-visible state -- HP reads back unchanged afterwards. State
+     diffing is therefore impossible; the `instruction_list` IS the prediction. `PyInstruction` exposes no
+     attributes either, only `__repr__` ("Damage SideOne: 174"), so it is parsed as text.
+  2. A poke-env `Battle` is live and mutable, and in self-play the two players advance independently between
+     await points. Reading the peer's battle for the opponent's side catches it up to a full turn ahead. So the
+     opponent's STATIC set data is frozen once and everything DYNAMIC comes from our own battle.
+  3. A faint creates a forced-switch decision INSIDE the same turn number, so consecutive decisions are not
+     consecutive board states. Those turns are skipped rather than mis-paired -- on BOTH sides. Skipping only our
+     own forced switches leaves the opponent's replacement choice overwriting their real move for that turn, which
+     reads as "the engine says they switched and dealt no damage" while we visibly took a full hit.
+
+We compare damage to OUR OWN side only. We see our HP exactly, where an opponent's arrives as a percentage, so
+this is the half of the comparison that carries no observation error of its own.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 from collections import defaultdict
 
 import poke_engine as pe
 from poke_env.battle import AbstractBattle, Battle
-from poke_env.player import Player, SimpleHeuristicsPlayer
+from poke_env.player import SimpleHeuristicsPlayer
 
 from kev_showdown.engine.actions import to_engine_choice
-from kev_showdown.engine.state import to_engine_state
+from kev_showdown.engine.state import known_sets_from_team, to_engine_state
 
-# (battle_tag, turn) -> role -> engine move string, and -> the state as seen at that turn
-MOVES: dict[tuple[str, int], dict[str, str]] = defaultdict(dict)
-SNAPSHOT: dict[tuple[str, int], pe.State] = {}
-# HP of every Pokemon on both sides as the turn OPENED, keyed by species. Keyed by species rather than by "the
-# active slot" on purpose: after a switch or a faint the active slot holds a DIFFERENT Pokemon next turn, so
-# comparing slots compares two unrelated Pokemon and reports a disagreement that is entirely our own bug.
-ACTUAL: dict[tuple[str, int], tuple[dict[str, int], dict[str, int]]] = {}
-ACTIVES: dict[tuple[str, int], tuple[str, str]] = {}   # species active at that turn, to look up afterwards
+DAMAGE_S1 = re.compile(r"Damage SideOne: (\d+)")
+HEAL_S1 = re.compile(r"Heal SideOne: (\d+)")
+TURNS: dict[tuple[str, int], dict] = defaultdict(dict)
 
 
 class Recorder(SimpleHeuristicsPlayer):
-    """Plays exactly like SimpleHeuristics, but records what it chose and what the board looked like."""
-
     def __init__(self, *args, role: str, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.role = role
-        self.peer: Player | None = None
+        self.role, self.peer, self._sets = role, None, {}
+
+    def _frozen(self, tag: str) -> dict:
+        """Freeze the peer's sets once, when every moveset has been populated. poke-env fills them lazily, so an
+        earlier freeze would bake in moveless sets and the engine would reject the opponent's real moves."""
+        if tag not in self._sets and self.peer is not None:
+            peer_battle = self.peer.battles.get(tag)
+            if peer_battle is not None:
+                frozen = known_sets_from_team(peer_battle.team)
+                if len(frozen) == 6:
+                    self._sets[tag] = frozen
+        return self._sets.get(tag, {})
 
     def choose_move(self, battle: AbstractBattle):  # type: ignore[override]
         order = super().choose_move(battle)
-        if isinstance(battle, Battle) and battle.active_pokemon is not None:
-            key = (battle.battle_tag, battle.turn)
-            choice = to_engine_choice(order)
-            if choice:
-                MOVES[key][self.role] = choice
-            # p1 builds the snapshot, with the opponent's true team read off the peer's own battle object
-            if self.role == "p1" and self.peer is not None:
-                peer_battle = self.peer.battles.get(battle.battle_tag)
-                if peer_battle is not None and peer_battle.active_pokemon is not None:
-                    SNAPSHOT[key] = to_engine_state(battle, peer_battle.team, opponent_known=True)
-                    ACTUAL[key] = ({m.species: (m.current_hp or 0) for m in battle.team.values()},
-                                   {m.species: (m.current_hp or 0) for m in peer_battle.team.values()})
-                    ACTIVES[key] = (battle.active_pokemon.species, peer_battle.active_pokemon.species)
+        if not isinstance(battle, Battle) or battle.active_pokemon is None:
+            return order
+        key = (battle.battle_tag, battle.turn)
+        slot = TURNS[key]
+        choice = to_engine_choice(order)
+        slot[f"{self.role}_choice"] = choice
+        slot[f"{self.role}_forced"] = bool(getattr(battle, "force_switch", False))
+        # A switch moves the damage onto the INCOMING Pokemon, so "damage to the mon that was active" is no longer
+        # the quantity the engine is reporting. Those turns need different bookkeeping; exclude them.
+        slot[f"{self.role}_switch"] = choice is not None and choice in {m.species for m in battle.team.values()}
+        if self.role == "p1":
+            slot.setdefault("state", to_engine_state(battle, self._frozen(battle.battle_tag)))
+            slot.setdefault("active", battle.active_pokemon.species)
+            slot.setdefault("hp", battle.active_pokemon.current_hp or 0)
+            slot["team_hp"] = {m.species: (m.current_hp or 0) for m in battle.team.values()}
         return order
 
 
-def _hp_of(side: pe.Side, species: str) -> int | None:
-    for mon in side.pokemon:
-        if mon.id == species:
-            return mon.hp
-    return None
-
-
-def _maxhp_of(side: pe.Side, species: str) -> int | None:
-    for mon in side.pokemon:
-        if mon.id == species:
-            return mon.maxhp
-    return None
-
-
-def _outcomes(state: pe.State, m1: str, m2: str, a1: str, a2: str) -> list[tuple[int, int]]:
-    """Every (hp of a1, hp of a2) the engine thinks this move pair can produce, looked up by species."""
+def predicted_damage(state: pe.State, m1: str, m2: str) -> list[tuple[float, int]]:
+    """(probability, damage to side one) for every branch the engine considered."""
     out = []
     for si in pe.generate_instructions(state, m1, m2):
-        state.apply_instructions(si)
-        h1, h2 = _hp_of(state.side_one, a1), _hp_of(state.side_two, a2)
-        state.reverse_instructions(si)
-        if h1 is not None and h2 is not None:
-            out.append((h1, h2))
+        # Net, not gross: draining and recoil moves emit Heal alongside Damage, and a Drain Punch turn can leave
+        # us with MORE hp than we started with. Summing damage alone reports that as a large disagreement.
+        reprs = [repr(i) for i in si.instruction_list]
+        dmg = sum(int(m) for r in reprs for m in DAMAGE_S1.findall(r))
+        heal = sum(int(m) for r in reprs for m in HEAL_S1.findall(r))
+        out.append((si.percentage, dmg - heal))
     return out
 
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--battles", type=int, default=50)
+    ap.add_argument("--battles", type=int, default=30)
     ap.add_argument("--concurrency", type=int, default=10)
-    ap.add_argument("--format", default="gen9randombattle")
     a = ap.parse_args()
 
-    p1 = Recorder(role="p1", battle_format=a.format, max_concurrent_battles=a.concurrency)
-    p2 = Recorder(role="p2", battle_format=a.format, max_concurrent_battles=a.concurrency)
+    p1 = Recorder(role="p1", battle_format="gen9randombattle", max_concurrent_battles=a.concurrency)
+    p2 = Recorder(role="p2", battle_format="gen9randombattle", max_concurrent_battles=a.concurrency)
     p1.peer, p2.peer = p2, p1
     await p1.battle_against(p2, n_battles=a.battles)
 
-    errors: list[float] = []
-    errored = skipped = 0
+    exact = close = off = skipped = errored = 0
     examples: list[str] = []
-    for key, state in SNAPSHOT.items():
-        tag, turn = key
-        moves, nxt = MOVES.get(key, {}), (tag, turn + 1)
-        if len(moves) < 2 or nxt not in ACTUAL:
+    for (tag, turn), slot in sorted(TURNS.items()):
+        nxt = TURNS.get((tag, turn + 1))
+        if (not slot.get("state") or not slot.get("p1_choice") or not slot.get("p2_choice")
+                or slot.get("p1_forced") or slot.get("p2_forced") or slot.get("p1_switch")
+                or nxt is None or not nxt.get("team_hp")
+                or slot["active"] not in nxt["team_hp"] or nxt.get("p1_forced")):
             skipped += 1
             continue
         try:
-            possible = _outcomes(state, moves["p1"], moves["p2"], *ACTIVES[key])
-        except BaseException as exc:                      # a Rust panic is not an Exception
+            branches = predicted_damage(slot["state"], slot["p1_choice"], slot["p2_choice"])
+        except BaseException as exc:
             errored += 1
-            if len(examples) < 4:
-                examples.append(f"  ERROR t{turn} {moves['p1']} vs {moves['p2']}: {str(exc)[:70]}")
+            if len(examples) < 3:
+                examples.append(f"  ERROR t{turn}: {str(exc)[:70]}")
             continue
-        if not possible:
+        if not branches:
             skipped += 1
             continue
-        a1, a2 = ACTIVES[key]
-        hp1, hp2 = ACTUAL[nxt]
-        if a1 not in hp1 or a2 not in hp2:
-            skipped += 1
-            continue
-        actual = (hp1[a1], hp2[a2])
-        # Scale by each side's max HP so the error is comparable across Pokemon, and take the closest outcome the
-        # engine offered -- it collapses damage rolls to an average, so exact equality is not the right question.
-        m1 = max(1, _maxhp_of(state.side_one, a1) or 1)
-        m2 = max(1, _maxhp_of(state.side_two, a2) or 1)
-        best = min(max(abs(p[0] - actual[0]) / m1, abs(p[1] - actual[1]) / m2) for p in possible)
-        errors.append(best)
-        if best > 0.25 and len(examples) < 8:
-            examples.append(f"  BIG   t{turn} {moves['p1']} vs {moves['p2']}: actual {actual}, "
-                            f"engine {possible[:2]} (err {best:.0%})")
+        actual = slot["hp"] - nxt["team_hp"][slot["active"]]
+        best = min(abs(d - actual) for _pct, d in branches)
+        maxhp = max(1, slot["hp"] or 1)
+        if best == 0:
+            exact += 1
+        elif best / maxhp <= 0.10:          # damage rolls span ~15%, so this is the "same move, different roll" band
+            close += 1
+        else:
+            off += 1
+            if len(examples) < 8:
+                examples.append(f"  OFF  t{turn} {slot['p1_choice']} vs {slot['p2_choice']}: "
+                                f"actual -{actual}, engine {[d for _p, d in branches][:4]}")
 
-    print(f"battles {a.battles}  turns compared {len(errors)}  (skipped {skipped}, engine errors {errored})")
-    if errors:
-        errors.sort()
-        within = lambda t: 100 * sum(e <= t for e in errors) / len(errors)  # noqa: E731
-        print(f"  predicted HP within  2% of actual: {within(0.02):5.1f}%")
-        print(f"  predicted HP within  5% of actual: {within(0.05):5.1f}%")
-        print(f"  predicted HP within 10% of actual: {within(0.10):5.1f}%")
-        print(f"  predicted HP within 25% of actual: {within(0.25):5.1f}%")
-        print(f"  median error {errors[len(errors)//2]:.1%}   p90 {errors[int(.9*len(errors))]:.1%}")
+    total = exact + close + off
+    print(f"battles {a.battles}  turns compared {total}  (skipped {skipped}, engine errors {errored})")
+    if total:
+        print(f"  exact damage match      {100 * exact / total:5.1f}%  ({exact})")
+        print(f"  within a damage roll    {100 * (exact + close) / total:5.1f}%  ({close} more)")
+        print(f"  genuinely disagreeing   {100 * off / total:5.1f}%  ({off})")
     for line in examples:
         print(line)
 
