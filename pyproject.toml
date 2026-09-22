@@ -1,0 +1,41 @@
+[project]
+name = "kev-showdown"
+version = "0.1.0"
+description = "A local Kev decision model plays Pokémon Showdown (gen9 random battles) through poke-env"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "poke-env>=0.10",
+    "httpx>=0.28",
+    "pydantic>=2.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "live: needs a real kev.serve instance reachable at KEV_BASE_URL (default http://127.0.0.1:8009); no mocking allowed on this path",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["kev_showdown", "collect.py", "evaluate.py", "tests"]
+
+[[tool.mypy.overrides]]
+module = "poke_env.*"
+ignore_missing_imports = true
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["kev_showdown"]

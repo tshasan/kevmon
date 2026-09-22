@@ -1,0 +1,9 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+data/
+replays/
+*.log.jsonl

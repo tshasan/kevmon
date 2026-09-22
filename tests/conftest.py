@@ -1,0 +1,63 @@
+"""Shared fixtures. `make_battle` builds a real poke-env `Battle` via its own public parsing API
+(`parse_request` / `parse_message`, the same calls a live Showdown connection would make) -- not a hand-rolled
+stand-in -- so tests that use it exercise real library behaviour (legality, type effectiveness, HP math, ...)."""
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+
+import pytest
+from poke_env.battle import Battle
+
+_OUR_SIDE = {
+    "name": "kevbot",
+    "id": "p1",
+    "pokemon": [
+        {
+            "ident": "p1: Garchomp", "details": "Garchomp, L50", "condition": "150/150", "active": True,
+            "stats": {"atk": 150, "def": 120, "spa": 90, "spd": 110, "spe": 130},
+            "moves": ["earthquake", "stoneedge", "swordsdance", "substitute"],
+            "baseAbility": "roughskin", "item": "lifeorb", "pokeball": "pokeball",
+            "ability": "roughskin", "teraType": "Ground",
+        },
+        {
+            "ident": "p1: Skarmory", "details": "Skarmory, L50", "condition": "140/140", "active": False,
+            "stats": {"atk": 90, "def": 150, "spa": 50, "spd": 110, "spe": 95},
+            "moves": ["bravebird", "roost", "spikes", "whirlwind"],
+            "baseAbility": "sturdy", "item": "leftovers", "pokeball": "pokeball",
+            "ability": "sturdy", "teraType": "Steel",
+        },
+    ],
+}
+_OUR_ACTIVE_REQUEST = {
+    "active": [{
+        "moves": [
+            {"move": "Earthquake", "id": "earthquake", "pp": 16, "maxpp": 16, "target": "allAdjacent", "disabled": False},
+            {"move": "Stone Edge", "id": "stoneedge", "pp": 8, "maxpp": 8, "target": "normal", "disabled": False},
+            {"move": "Swords Dance", "id": "swordsdance", "pp": 32, "maxpp": 32, "target": "self", "disabled": False},
+            {"move": "Substitute", "id": "substitute", "pp": 16, "maxpp": 16, "target": "self", "disabled": False},
+        ],
+        "canTerastallize": "Ground",
+    }],
+    "side": _OUR_SIDE,
+    "rqid": 1,
+}
+
+
+def _make_battle(battle_tag: str = "battle-gen9randombattle-1", opponent_hp: str = "160/160") -> Battle:
+    """One turn, mid-battle: our Garchomp (active) + benched Skarmory vs. an opposing Excadrill."""
+    battle = Battle(battle_tag=battle_tag, username="kevbot", logger=logging.getLogger("kev_showdown.tests"), gen=9)
+    battle.parse_request(_OUR_ACTIVE_REQUEST)
+    battle.parse_message(["", "switch", "p2a: Excadrill", "Excadrill, L50", opponent_hp])
+    battle.parse_message(["", "turn", "5"])
+    return battle
+
+
+@pytest.fixture
+def make_battle() -> Callable[..., Battle]:
+    return _make_battle
+
+
+@pytest.fixture
+def battle() -> Battle:
+    return _make_battle()
