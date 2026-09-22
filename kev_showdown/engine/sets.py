@@ -22,6 +22,7 @@ from typing import NotRequired, TypedDict
 from poke_env.battle import Battle, Pokemon
 from poke_env.data import GenData
 
+from kev_showdown.engine import items
 from kev_showdown.engine.state import KnownSet
 from kev_showdown.engine.stats import final_stats, randbats_evs_ivs
 
@@ -64,44 +65,11 @@ def _gen() -> GenData:
     return GenData.from_gen(9)
 
 
-def _rock_weak(species: str) -> bool:
-    """Rock effectiveness >= 1 in Showdown's terms means at least 2x -- the Heavy-Duty Boots trigger."""
+def choose_item(species: str, moves: tuple[str, ...], role: str, ability: str,
+                rng: random.Random) -> str:
+    """Delegates to the full port in `items.py` (getPriorityItem then getItem)."""
     entry = _gen().pokedex.get(species, {})
-    chart = _gen().type_chart
-    mult = 1.0
-    for t in entry.get("types", []):
-        mult *= chart.get(t.upper(), {}).get("ROCK", 1)
-    return mult >= 2
-
-
-def choose_item(species: str, moves: tuple[str, ...], role: str, ability: str, rng: random.Random) -> str:
-    """The ported head of teams.ts::getItem. Branches implemented, in the generator's own order:
-    Choice Band/Scarf, Choice Specs/Scarf, Assault Vest, Substitute->Leftovers, Heavy-Duty Boots (Rock-weak),
-    Protect->Leftovers, Bulky roles->Leftovers. Everything past that falls through to Leftovers."""
-    cats = {m: _gen().moves.get(m, {}).get("category", "Status") for m in moves}
-    physical = sum(c == "Physical" for c in cats.values())
-    special = sum(c == "Special" for c in cats.values())
-    status = sum(c == "Status" for c in cats.values())
-    base = _gen().pokedex.get(species, {}).get("baseStats", {})
-    spe = base.get("spe", 0)
-
-    blockers = {"dragontail", "fakeout", "firstimpression", "flamecharge", "rapidspin", "trailblaze"}
-    if physical >= len(moves) and not (set(moves) & blockers):
-        scarf = (role != "Wallbreaker" and base.get("atk", 0) >= 100 and 60 <= spe <= 108)
-        return "choicescarf" if (scarf and rng.random() < 0.5) else "choiceband"
-    if special >= len(moves) or (special >= len(moves) - 1 and set(moves) & {"flipturn", "uturn"}):
-        scarf = (role != "Wallbreaker" and base.get("spa", 0) >= 100 and 60 <= spe <= 108
-                 and "uturn" not in moves)
-        return "choicescarf" if (scarf and rng.random() < 0.5) else "choicespecs"
-    if status == 0 and role not in {"Fast Attacker", "Wallbreaker", "Tera Blast user"}:
-        return "assaultvest"
-    if "substitute" in moves:
-        return "leftovers"
-    if _rock_weak(species):
-        return "heavydutyboots"
-    if "protect" in moves and ability != "speedboost":
-        return "leftovers"
-    return "leftovers"
+    return items.choose_item(species, entry, moves, role, ability, _gen().moves, _gen().type_chart, rng)
 
 
 def sample_set(species: str, rng: random.Random, observed: Pokemon | None = None) -> KnownSet | None:
