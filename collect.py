@@ -4,10 +4,14 @@ Teacher = poke-env's SimpleHeuristicsPlayer. Every non-forced turn becomes one l
   action (choice): the option the teacher picked            -> imitation (behaviour cloning)
   win    (noul)  : whether the teacher's side won the battle -> a free value signal, labelled after the battle ends
 
-Records are split into train / heldout BY BATTLE (kev_showdown.split.battle_split), so no heldout turn shares a
-battle with a training turn -- see tests/test_split.py for the leakage guard on that guarantee.
+Records are split into train / calibration / development BY BATTLE (kev_showdown.split.battle_split), so no
+calibration or development turn shares a battle with a training turn -- see tests/test_split.py for the leakage
+guard on that guarantee. The three file names match what kev's own Modal fine-tune skill expects
+(../kev/skills/kev-finetune/scripts/kev_modal.py: PARTITIONS = train/calibration/development), so the output
+directory can be pointed at directly:
 
-    python collect.py --battles 300 --out data
+    python collect.py --battles 300 --out data/showdown-v1
+    modal run ../kev/skills/kev-finetune/scripts/kev_modal.py::train --data data/showdown-v1 --name showdown-v1
 """
 from __future__ import annotations
 
@@ -69,7 +73,8 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--battles", type=int, default=300, help="battles per opponent type")
     ap.add_argument("--format", default="gen9randombattle")
-    ap.add_argument("--heldout", type=float, default=0.15)
+    ap.add_argument("--calibration", type=float, default=0.10, help="fraction of battles held out to fit temperature")
+    ap.add_argument("--development", type=float, default=0.15, help="fraction of battles held out to score the fine-tune")
     ap.add_argument("--out", default="data")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
@@ -85,7 +90,7 @@ async def main() -> None:
              won=teacher.n_won_battles - before_won, finished=teacher.n_finished_battles - before_done)
 
     tags = [t for t in teacher.records if teacher.battles[t].finished]
-    splits = battle_split(tags, a.heldout, random.Random(a.seed))
+    splits = battle_split(tags, {"calibration": a.calibration, "development": a.development}, random.Random(a.seed))
 
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     for name, split_tags in splits.items():
