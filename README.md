@@ -48,7 +48,7 @@ Write these numbers down. That's your "before" chart.
 ## 2. Collect teacher data
 
 ```bash
-python collect.py --battles 300 --out data/showdown-v1     # 900 battles total, roughly 20k labelled turns
+python collect.py --battles 300 --out data/pokebot-v1     # 900 battles total, roughly 20k labelled turns
 ```
 
 The teacher is poke-env's `SimpleHeuristicsPlayer`. Every non-forced turn becomes a record with the teacher's
@@ -77,27 +77,30 @@ Training a 4B+ model is slow on a laptop GPU (MPS/CPU), even with LoRA -- every 
 the full backbone. `../kev/skills/kev-finetune/scripts/kev_modal.py` rents a GPU per run (H100 by default, ~$3.95/hr;
 cheaper tiers via `KEV_GPU`: L4 $0.80/hr, A10G $1.10/hr, A100 $2.10/hr) and handles the fine-tune, calibration and
 scoring in one container. Needs a Modal account first (`uvx modal setup`) -- that's a real account with billing, so
-set it up yourself before running this.
+set it up yourself before running this. Everything here runs under the Modal app name `pokebot`
+(`KEV_APP_NAME=pokebot`, exported once below); run names (`--name`) are immutable, so a retry needs a new suffix
+(`pokebot-v2`, ...).
 
 ```bash
 # in ../kev
+export KEV_APP_NAME=pokebot
 modal run skills/kev-finetune/scripts/kev_modal.py::train \
-  --data ../kevmon/data/showdown-v1 --name showdown-v1 --init-from jaredpalmer/kev-4b
+  --data ../kevmon/data/pokebot-v1 --name pokebot-v1 --init-from jaredpalmer/kev-4b
 ```
 
 A delta fine-tune on a few hundred to a few thousand records like this typically runs in ~12-15 minutes for about
-$1-3. Reports land in `runs/showdown-v1/` on the Modal volume; pull them locally with
-`modal run skills/kev-finetune/scripts/kev_modal.py::pull --name showdown-v1`.
+$1-3. Reports land in `runs/pokebot-v1/` on the Modal volume; pull them locally with
+`modal run skills/kev-finetune/scripts/kev_modal.py::pull --name pokebot-v1`.
 
 ### 3b. Local (`kev.train`, for a fast dry run before spending money on 3a)
 
 ```bash
 # in ../kev
-uv run python -m kev.train --data ../kevmon/data/showdown-v1/train.jsonl \
+uv run python -m kev.train --data ../kevmon/data/pokebot-v1/train.jsonl \
   --base Qwen/Qwen3.5-4B-Base --init_from jaredpalmer/kev-4b \
-  --epochs 2 --lr 2e-5 --batch 1 --accum 8 --dtype bf16 --checkpointing 1 --device cuda --out runs/showdown
+  --epochs 2 --lr 2e-5 --batch 1 --accum 8 --dtype bf16 --checkpointing 1 --device cuda --out runs/pokebot
 
-uv run python -m kev.benchmark --run runs/showdown --data ../kevmon/data/showdown-v1/development.jsonl --out runs/showdown-eval
+uv run python -m kev.benchmark --run runs/pokebot --data ../kevmon/data/pokebot-v1/development.jsonl --out runs/pokebot-eval
 ```
 
 On Apple Silicon, drop `--dtype bf16` (CUDA-only; use `--weights_dtype bf16` instead, which works everywhere) and
@@ -107,8 +110,30 @@ random guessing over ~10 options is around 10%.
 
 ## 4. Play with the fine-tuned model
 
+Also two ways, matching however you trained it in step 3.
+
+### 4a. Modal serve (matches 3a; sidesteps the MPS slowness entirely)
+
+`kev_modal.py`'s `Serve` endpoint (`KEV_SERVE_GPU`, default L4 $0.80/hr) scales to zero when idle
+(5-minute window) -- it only bills while a battle is actually in flight, not around the clock. Deploy once, point
+`evaluate.py`/`KevPlayer` at the resulting URL:
+
 ```bash
-KEV_DTYPE=bf16 uv run --extra serve python -m kev.serve --run runs/showdown --port 8009
+# in ../kev
+KEV_APP_NAME=pokebot KEV_SERVE_RUN=pokebot-v1 modal deploy skills/kev-finetune/scripts/kev_modal.py
+```
+
+The deploy prints the actual URL (labelled `pokebot-api`, so it looks like `https://<your-workspace>--pokebot-api.modal.run`) -- use exactly what it prints:
+
+```bash
+# in kevmon, once deployed
+python evaluate.py --kev <url from the deploy output> --battles 100 --log_file kev.log.jsonl
+```
+
+### 4b. Local (`kev.serve`, for quick checks without a deploy)
+
+```bash
+KEV_DTYPE=bf16 uv run --extra serve python -m kev.serve --run runs/pokebot --port 8009
 python evaluate.py --battles 100 --save_replays replays --log_file kev.log.jsonl
 ```
 
