@@ -86,3 +86,23 @@ def _make_battle_no_active() -> Battle:
 @pytest.fixture
 def battle_no_active() -> Battle:
     return _make_battle_no_active()
+
+
+def _make_battle_recharge() -> Battle:
+    """Our active must recharge (e.g. after Hyper Beam) -- poke-env's Move.entry stub for "recharge" lacks a
+    "priority" key, so move.priority raises KeyError. Switching out remains a real, legal, separately-described
+    option; only the undescribable "recharge" pseudo-move itself should be excluded."""
+    battle = Battle(battle_tag="battle-gen9randombattle-3", username="kevbot", logger=logging.getLogger("kev_showdown.tests"), gen=9)
+    request: dict[str, Any] = {
+        "active": [{"moves": [{"move": "Recharge", "id": "recharge", "pp": 1, "maxpp": 1, "target": "self", "disabled": False}]}],
+        "side": {"name": "kevbot", "id": "p1", "pokemon": [{**p, "active": i == 0} for i, p in enumerate(_OUR_SIDE["pokemon"])]},
+        "rqid": 1,
+    }
+    battle.parse_request(request)
+    battle.parse_message(["", "switch", "p2a: Excadrill", "Excadrill, L50", "160/160"])
+    return battle
+
+
+@pytest.fixture
+def battle_recharge() -> Battle:
+    return _make_battle_recharge()

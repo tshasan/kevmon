@@ -32,6 +32,16 @@ def test_mon_has_a_fixed_shape_even_with_no_active_pokemon(battle_no_active: Bat
     assert set(our_active) == {"species", "types", "hp", "status", "boosts", "terastallized"}
 
 
+def test_build_options_handles_a_forced_recharge_turn(battle_recharge: Battle) -> None:
+    """Regression test: poke-env's fallback stub for the "recharge" pseudo-move (used after Hyper Beam) lacks a
+    "priority" key, and move.priority used to raise KeyError here, crashing every collect.py/evaluate.py run that
+    reached one. "recharge" itself isn't modeled (no real decision, and no way to describe it safely), but
+    switching out -- a genuine legal alternative to recharging -- must still show up as an option."""
+    options = build_options(battle_recharge)
+    assert "switch to skarmory" in options
+    assert not any("recharge" in key for key in options)
+
+
 def test_build_options_keys_are_unique_and_legal(battle: Battle) -> None:
     """A key collision in build_options would silently drop a legal move from the request -- the model would never
     even see it as an option, which is a much sneakier bug than an outright crash."""

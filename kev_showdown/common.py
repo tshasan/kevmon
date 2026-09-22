@@ -158,10 +158,14 @@ def _switch_desc(mon: Pokemon, battle: Battle) -> str:
 
 
 def order_key(order: SingleBattleOrder) -> str | None:
-    """Stable, human-readable option name for an order. None for orders we do not model (mega/z/dynamax)."""
+    """Stable, human-readable option name for an order. None for orders we do not model: mega/z/dynamax, and
+    forced pseudo-moves (e.g. "recharge" after Hyper Beam) whose poke-env stub entry lacks "priority" -- move.priority
+    raises KeyError on those, and there's no real decision to model on a turn with only one legal action anyway."""
     if order.mega or order.z_move or order.dynamax:
         return None
     if isinstance(order.order, Move):
+        if "priority" not in order.order.entry:
+            return None
         return f"use {order.order.id}" + (" with tera" if order.terastallize else "")
     if isinstance(order.order, Pokemon):
         return f"switch to {order.order.species}"
