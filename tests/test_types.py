@@ -1,28 +1,12 @@
-"""kev_showdown.types: the request/response models must accept exactly what kev's real API sends and rejects
-nothing valid -- test_live_server.py cross-checks this against the actual running model."""
+"""kev_showdown.types: the response model must accept exactly what kev's real API sends and reject anything else --
+test_live_server.py cross-checks this against the actual running model. The request side is a plain TypedDict (see
+common.py's build_request), so there's nothing to runtime-validate there; mypy checks it statically instead."""
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from kev_showdown.types import Choice, ChoiceAnswer, Noul, NoulAnswer, SystemOneRequest, SystemOneResponse
-
-
-def test_request_round_trips_through_json() -> None:
-    req = SystemOneRequest(
-        state={"turn": 1},
-        questions={
-            "action": Choice(instructions="pick one", criteria={"a": "first", "b": "second"}),
-            "win": Noul(instructions="will we win?"),
-        },
-    )
-    dumped = req.model_dump(mode="json", exclude_none=True)
-    assert SystemOneRequest.model_validate(dumped) == req
-
-
-def test_choice_rejects_empty_criteria() -> None:
-    with pytest.raises(ValidationError):
-        Choice(instructions="x", criteria={})
+from kev_showdown.types import ChoiceAnswer, NoulAnswer, SystemOneResponse
 
 
 def test_response_discriminates_answer_types_by_type_field() -> None:

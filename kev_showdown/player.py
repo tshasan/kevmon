@@ -5,6 +5,7 @@ Start Kev first, e.g.:
 """
 from __future__ import annotations
 
+import json
 import random
 import statistics
 import time
@@ -55,10 +56,10 @@ class KevPlayer(Player):
         req = build_request(battle, options, self.rng, ask_win=self.ask_win)
         t = time.perf_counter()
         try:
-            r = await (await self._client()).post(self.kev_url, json=req.model_dump(mode="json", exclude_none=True))
+            r = await (await self._client()).post(self.kev_url, json=req)
             r.raise_for_status()
             answers = SystemOneResponse.model_validate(r.json())
-        except (httpx.HTTPError, ValidationError, KeyError) as e:  # Kev down, slow, or malformed: never forfeit over it
+        except (httpx.HTTPError, ValidationError, KeyError, json.JSONDecodeError) as e:  # never forfeit over Kev being down, slow, or malformed
             self.n_fallbacks += 1
             emit_warning(self.log, "kev.fallback", battle_tag=battle.battle_tag, turn=battle.turn,
                          error_type=type(e).__name__, error=str(e))
@@ -83,7 +84,12 @@ class KevPlayer(Player):
              confidence=action.confidence, p_win=p_win, latency_ms=round(latency_ms, 1))
         if self.verbose:
             print(f"[kev] {battle.battle_tag} t{battle.turn}: {action.choice} (conf {action.confidence}, p(win) {p_win})")
-        return options[action.choice][0] if action.choice in options else self.choose_random_move(battle)
+        if action.choice in options:
+            return options[action.choice][0]
+        self.n_fallbacks += 1
+        emit_warning(self.log, "kev.fallback", battle_tag=battle.battle_tag, turn=battle.turn,
+                     error_type="UnknownChoice", error=f"kev returned {action.choice!r}, not one of the offered options")
+        return self.choose_random_move(battle)
 
     def stats(self) -> StatsDict:
         lat = self.latencies_ms

@@ -1,13 +1,18 @@
 """Typed shapes for Kev's `/v1/systemone` wire contract (request and response).
 
-These mirror kev's own `kev/api.py` (Noul/Choice/Score/SystemOneRequest) and `kev/serve.py`'s response body
-byte-for-byte. They are declared independently rather than imported from the `kev` package so that kev_showdown
-never has to install kev's heavy training/serving dependencies (torch, transformers, ...) just to get types for
-an HTTP client. If kev's wire contract changes, `test_types.py` (`--live`) is what will catch the drift.
+The request side is TypedDicts, not pydantic: `kev_showdown.common.build_request` runs once per battle turn (and,
+in `collect.py`, thousands of times with no model latency to hide the cost) building a request from data this
+process already computed -- there's no untrusted input on that path to justify runtime validation. TypedDict gives
+mypy the same static guarantee at zero runtime cost.
+
+The response side stays pydantic: it validates a real HTTP reply from Kev, which *is* untrusted input, and that's
+exactly the boundary where catching a malformed/drifted shape earns its cost. These mirror kev's own `kev/api.py`
+(Noul/Choice/Score) and `kev/serve.py`'s response body. They're declared independently rather than imported from
+the `kev` package so kev_showdown never has to install kev's torch/transformers just to get an HTTP client's types.
 """
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypedDict, Union
 
 from pydantic import BaseModel, Field
 
@@ -20,31 +25,16 @@ MAX_OPTIONS = 255
 
 # --------------------------------------------------------------------------------------------------------- request
 
-class Noul(BaseModel):
-    type: Literal["noul"] = "noul"
+class Question(TypedDict, total=False):
+    type: Literal["noul", "choice", "score"]
     instructions: JSONContent
-    criteria: dict[str, JSONContent] | None = None
+    criteria: JSONContent
 
 
-class Choice(BaseModel):
-    type: Literal["choice"] = "choice"
-    instructions: JSONContent
-    criteria: dict[str, JSONContent] = Field(min_length=1, max_length=MAX_OPTIONS)
-
-
-class Score(BaseModel):
-    type: Literal["score"] = "score"
-    instructions: JSONContent
-    criteria: list[JSONContent] = Field(min_length=2, max_length=MAX_OPTIONS)
-
-
-Question = Annotated[Union[Noul, Choice, Score], Field(discriminator="type")]
-
-
-class SystemOneRequest(BaseModel):
+class SystemOneRequest(TypedDict):
     state: JSONContent
-    model: str = "kev-latest"
-    questions: dict[str, Question] = Field(min_length=1)
+    model: str
+    questions: dict[str, Question]
 
 
 # -------------------------------------------------------------------------------------------------------- response

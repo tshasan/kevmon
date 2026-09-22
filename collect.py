@@ -59,8 +59,7 @@ class TeacherLogger(SimpleHeuristicsPlayer):
             if label is None:
                 self.skipped += 1          # teacher chose something we don't model (e.g. a default order)
             else:
-                req = build_request(battle, options, self.rng, ask_win=True)
-                record: LabelledRecord = req.model_dump(mode="json", exclude_none=True)  # type: ignore[assignment]
+                record: LabelledRecord = build_request(battle, options, self.rng, ask_win=True)  # type: ignore[assignment]
                 record["questions"]["action"]["label"] = label
                 self.records[battle.battle_tag].append(record)
         return order
@@ -80,9 +79,10 @@ async def main() -> None:
                  MaxBasePowerPlayer(battle_format=a.format, max_concurrent_battles=10),
                  SimpleHeuristicsPlayer(battle_format=a.format, max_concurrent_battles=10)]
     for opp in opponents:
+        before_won, before_done = teacher.n_won_battles, teacher.n_finished_battles
         await teacher.battle_against(opp, n_battles=a.battles)
         emit(log, "collect.opponent_done", opponent=type(opp).__name__,
-             won=teacher.n_won_battles, finished=teacher.n_finished_battles)
+             won=teacher.n_won_battles - before_won, finished=teacher.n_finished_battles - before_done)
 
     tags = [t for t in teacher.records if teacher.battles[t].finished]
     splits = battle_split(tags, a.heldout, random.Random(a.seed))

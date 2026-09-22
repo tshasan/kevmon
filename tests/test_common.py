@@ -7,7 +7,6 @@ import random
 from poke_env.battle import Battle
 
 from kev_showdown.common import build_options, build_request, order_key, render_state
-from kev_showdown.types import Choice, Noul
 
 
 def test_render_state_has_no_label_leaking_fields(battle: Battle) -> None:
@@ -21,6 +20,16 @@ def test_render_state_has_no_label_leaking_fields(battle: Battle) -> None:
     our_active, opponent_active = state["our_active"], state["opponent_active"]
     assert isinstance(our_active, dict) and our_active["species"] == "garchomp"
     assert isinstance(opponent_active, dict) and opponent_active["species"] == "excadrill"
+
+
+def test_mon_has_a_fixed_shape_even_with_no_active_pokemon(battle_no_active: Battle) -> None:
+    """Before any switch-in, battle.active_pokemon is None (verified against poke-env directly -- not a fainting
+    scenario). render_state must still produce the same 6 keys for our_active, not a smaller shape."""
+    assert battle_no_active.active_pokemon is None
+    state = render_state(battle_no_active)
+    our_active = state["our_active"]
+    assert isinstance(our_active, dict)
+    assert set(our_active) == {"species", "types", "hp", "status", "boosts", "terastallized"}
 
 
 def test_build_options_keys_are_unique_and_legal(battle: Battle) -> None:
@@ -40,28 +49,30 @@ def test_option_order_is_shuffled_per_call(battle: Battle) -> None:
     orderings = set()
     for seed in range(20):
         req = build_request(battle, options, random.Random(seed))
-        action = req.questions["action"]
-        assert isinstance(action, Choice)
-        orderings.add(tuple(action.criteria))
+        action = req["questions"]["action"]
+        criteria = action["criteria"]
+        assert action["type"] == "choice" and isinstance(criteria, dict)
+        orderings.add(tuple(criteria))
     assert len(orderings) > 1
 
 
 def test_build_request_shape(battle: Battle) -> None:
     options = build_options(battle)
     req = build_request(battle, options, random.Random(0), ask_win=True)
-    assert isinstance(req.questions["action"], Choice)
-    assert isinstance(req.questions["win"], Noul)
-    assert set(req.questions["action"].criteria) == set(options)
+    action_criteria = req["questions"]["action"]["criteria"]
+    assert req["questions"]["action"]["type"] == "choice"
+    assert req["questions"]["win"]["type"] == "noul"
+    assert isinstance(action_criteria, dict) and set(action_criteria) == set(options)
 
     req_no_win = build_request(battle, options, random.Random(0), ask_win=False)
-    assert "win" not in req_no_win.questions
+    assert "win" not in req_no_win["questions"]
 
 
-def test_build_request_is_json_serialisable_without_none_holes(battle: Battle) -> None:
-    """What actually goes over the wire: dumping and re-validating must round-trip losslessly."""
-    from kev_showdown.types import SystemOneRequest
+def test_build_request_is_json_serialisable(battle: Battle) -> None:
+    """What actually goes over the wire: must round-trip through json.dumps/loads losslessly (no non-JSON types
+    like tuples or Enums sneaking into option text)."""
+    import json
 
     options = build_options(battle)
     req = build_request(battle, options, random.Random(0))
-    dumped = req.model_dump(mode="json", exclude_none=True)
-    assert SystemOneRequest.model_validate(dumped) == req
+    assert json.loads(json.dumps(req)) == req

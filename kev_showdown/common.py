@@ -13,7 +13,7 @@ import random
 from poke_env.battle import Battle, Move, Pokemon
 from poke_env.player.battle_order import SingleBattleOrder
 
-from .types import Choice, JSONContent, Noul, Question, SystemOneRequest
+from .types import JSONContent, Question, SystemOneRequest
 
 ACTION_INSTRUCTIONS = (
     "You are playing a Pokemon Showdown singles battle. Pick the single best action for this turn. "
@@ -43,8 +43,11 @@ def _boosts(mon: Pokemon) -> str:
 
 
 def _mon(mon: Pokemon | None) -> dict[str, JSONContent]:
+    """Always the same 6 keys (fixed shape), even when nothing has switched in yet -- e.g. the turn right after our
+    active Pokemon faints and before a replacement is chosen, where `mon` is None but the request still gets built."""
     if mon is None:
-        return {"species": "unknown"}
+        return {"species": "unknown", "types": "unknown", "hp": "unknown", "status": "unknown",
+                "boosts": "unknown", "terastallized": "unknown"}
     return {
         "species": mon.species,
         "types": _types(mon),
@@ -100,7 +103,7 @@ def _effectiveness(move: Move, target: Pokemon | None) -> float | None:
         return None
     try:
         return target.damage_multiplier(move)
-    except Exception:
+    except (KeyError, AttributeError):  # exotic types (e.g. ???/Stellar) missing from the type chart lookup
         return None
 
 
@@ -113,12 +116,14 @@ def _tera_type(battle: Battle) -> str | None:
         for p in battle.last_request["side"]["pokemon"]:
             if p.get("active") and p.get("teraType"):
                 return str(p["teraType"]).title()
-    except Exception:
+    except (KeyError, TypeError):  # last_request missing "side"/"pokemon", or not set yet (None)
         pass
     return None
 
 
-def _move_desc(move: Move, battle: Battle, tera: bool) -> str:
+def _move_desc(move: Move, battle: Battle, tera: bool, tera_type: str | None) -> str:
+    """`tera_type` is the battle's tera type for this turn, computed once by the caller (build_options) instead of
+    once per move here -- can_tera is turn-scoped, not move-scoped, so recomputing it per move was pure waste."""
     me, opp = battle.active_pokemon, battle.opponent_active_pokemon
     parts = [move.type.name.title(), move.category.name.lower()]
     if move.category.name != "STATUS":
@@ -138,8 +143,7 @@ def _move_desc(move: Move, battle: Battle, tera: bool) -> str:
     if move.self_switch:
         parts.append("switches user out")
     if tera:
-        tt = _tera_type(battle)
-        parts.append(f"terastallize to {tt} first" if tt else "terastallize first")
+        parts.append(f"terastallize to {tera_type} first" if tera_type else "terastallize first")
     return ", ".join(parts)
 
 
@@ -168,6 +172,7 @@ def build_options(battle: Battle) -> dict[str, tuple[SingleBattleOrder, str]]:
     """All legal orders this turn -> {option name: (order, description)}. Uses poke-env's own legality check."""
     valid = battle.valid_orders
     valid = valid() if callable(valid) else valid
+    tera_type = _tera_type(battle) if battle.can_tera else None   # turn-scoped: compute once, not once per move
     out: dict[str, tuple[SingleBattleOrder, str]] = {}
     for order in valid:
         if not isinstance(order, SingleBattleOrder):
@@ -176,7 +181,7 @@ def build_options(battle: Battle) -> dict[str, tuple[SingleBattleOrder, str]]:
         if key is None or key in out:
             continue
         if isinstance(order.order, Move):
-            desc = _move_desc(order.order, battle, order.terastallize)
+            desc = _move_desc(order.order, battle, order.terastallize, tera_type)
         elif isinstance(order.order, Pokemon):
             desc = _switch_desc(order.order, battle)
         else:
@@ -187,13 +192,16 @@ def build_options(battle: Battle) -> dict[str, tuple[SingleBattleOrder, str]]:
 
 def build_request(battle: Battle, options: dict[str, tuple[SingleBattleOrder, str]], rng: random.Random,
                   ask_win: bool = True) -> SystemOneRequest:
-    """The /v1/systemone request. Option order is shuffled every call: Kev can be option-order sensitive, and a fixed
-    order would let it learn 'pick the first switch' instead of reading the descriptions."""
+    """The /v1/systemone request, as a plain dict. Built once per turn from data this process already computed --
+    there is no untrusted input here to justify pydantic validation (unlike the *response*, which is real network
+    input and is validated in kev_showdown.types.SystemOneResponse). Option order is shuffled every call: Kev can be
+    option-order sensitive, and a fixed order would let it learn 'pick the first switch' instead of reading the text."""
     names = list(options)
     rng.shuffle(names)
     questions: dict[str, Question] = {
-        "action": Choice(instructions=ACTION_INSTRUCTIONS, criteria={n: options[n][1] for n in names}),
+        "action": {"type": "choice", "instructions": ACTION_INSTRUCTIONS,
+                   "criteria": {n: options[n][1] for n in names}},
     }
     if ask_win:
-        questions["win"] = Noul(instructions=WIN_INSTRUCTIONS)
-    return SystemOneRequest(state=render_state(battle), questions=questions)
+        questions["win"] = {"type": "noul", "instructions": WIN_INSTRUCTIONS}
+    return {"state": render_state(battle), "model": "kev-latest", "questions": questions}

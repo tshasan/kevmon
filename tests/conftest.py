@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from poke_env.battle import Battle
 
-_OUR_SIDE = {
+_OUR_SIDE: dict[str, Any] = {
     "name": "kevbot",
     "id": "p1",
     "pokemon": [
@@ -61,3 +62,27 @@ def make_battle() -> Callable[..., Battle]:
 @pytest.fixture
 def battle() -> Battle:
     return _make_battle()
+
+
+def _make_battle_no_active() -> Battle:
+    """A request where every one of our Pokemon has `active: False` -- the real, verified shape of the very first
+    request of a battle, before any switch-in has happened yet. `battle.active_pokemon` is `None` here (confirmed
+    against poke-env directly), so this is what exercises common.py's None branch, not a fainting scenario."""
+    battle = Battle(battle_tag="battle-gen9randombattle-2", username="kevbot", logger=logging.getLogger("kev_showdown.tests"), gen=9)
+    request = {
+        "active": [{"moves": [
+            {"move": "Earthquake", "id": "earthquake", "pp": 16, "maxpp": 16, "target": "allAdjacent", "disabled": False},
+        ]}],
+        "side": {"name": "kevbot", "id": "p1", "pokemon": [
+            {**p, "active": False} for p in _OUR_SIDE["pokemon"]
+        ]},
+        "rqid": 1,
+    }
+    battle.parse_request(request)
+    battle.parse_message(["", "switch", "p2a: Excadrill", "Excadrill, L50", "160/160"])
+    return battle
+
+
+@pytest.fixture
+def battle_no_active() -> Battle:
+    return _make_battle_no_active()

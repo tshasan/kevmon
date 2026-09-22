@@ -40,7 +40,7 @@ async def test_real_model_answers_a_real_battle_request(battle: Battle) -> None:
     req = build_request(battle, options, random.Random(0), ask_win=True)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(f"{KEV_BASE_URL}/v1/systemone", json=req.model_dump(mode="json", exclude_none=True))
+        r = await client.post(f"{KEV_BASE_URL}/v1/systemone", json=req)
     r.raise_for_status()
     resp = SystemOneResponse.model_validate(r.json())
 
@@ -64,7 +64,7 @@ async def test_option_order_does_not_change_the_set_of_legal_answers(battle: Bat
     async with httpx.AsyncClient(timeout=30.0) as client:
         for seed in range(5):
             req = build_request(battle, options, random.Random(seed), ask_win=False)
-            r = await client.post(f"{KEV_BASE_URL}/v1/systemone", json=req.model_dump(mode="json", exclude_none=True))
+            r = await client.post(f"{KEV_BASE_URL}/v1/systemone", json=req)
             r.raise_for_status()
             resp = SystemOneResponse.model_validate(r.json())
             action = resp.answers["action"]
