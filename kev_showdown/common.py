@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import random
 
-from poke_env.battle import Battle, Move, Pokemon
+from poke_env.battle import Battle, Move, Pokemon, PokemonType
 from poke_env.player.battle_order import SingleBattleOrder
 
 from .types import JSONContent, Question, SystemOneRequest
@@ -44,7 +44,11 @@ def _boosts(mon: Pokemon) -> str:
 
 def _mon(mon: Pokemon | None) -> dict[str, JSONContent]:
     """Always the same 6 keys (fixed shape), even when nothing has switched in yet -- e.g. the turn right after our
-    active Pokemon faints and before a replacement is chosen, where `mon` is None but the request still gets built."""
+    active Pokemon faints and before a replacement is chosen, where `mon` is None but the request still gets built.
+
+    Deliberately no raw base-stat block: at ~22 tokens per side it is the most expensive thing that can go here, and
+    `speed` and `offense` already carry the only comparisons anything downstream makes from those numbers. The state
+    has a hard 384-token budget (kev.model.MAX_STATE) and over-running it silently drops the record from training."""
     if mon is None:
         return {"species": "unknown", "types": "unknown", "hp": "unknown", "status": "unknown",
                 "boosts": "unknown", "terastallized": "unknown"}
@@ -58,13 +62,54 @@ def _mon(mon: Pokemon | None) -> dict[str, JSONContent]:
     }
 
 
+def _speed(mon: Pokemon | None) -> int | None:
+    try:
+        return int(mon.base_stats["spe"]) if mon is not None else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _speed_matchup(me: Pokemon | None, opp: Pokemon | None) -> str:
+    """Base-speed comparison only: it ignores items, abilities and paralysis, so it is a proxy for who moves first,
+    not a guarantee. Rendered because move-vs-switch decisions hinge on it and the model cannot infer it otherwise."""
+    a, b = _speed(me), _speed(opp)
+    if a is None or b is None:
+        return "unknown"
+    return f"{'faster' if a > b else 'slower' if a < b else 'tied'} ({a} vs {b})"
+
+
+def _effective_stat(mon: Pokemon, stat: str) -> float:
+    boost = mon.boosts.get(stat, 0)
+    multiplier = (2 + boost) / 2 if boost >= 0 else 2 / (2 - boost)
+    return (2 * mon.base_stats[stat] + 36) * multiplier
+
+
+def _offense(me: Pokemon | None, opp: Pokemon | None) -> str:
+    """Attacker-vs-defender stat ratios, boosts included. Whether to attack physically or specially is a division the
+    model would otherwise have to do in its head from raw base stats (see the arithmetic note in the module docstring)."""
+    if me is None or opp is None:
+        return "unknown"
+    try:
+        physical = _effective_stat(me, "atk") / _effective_stat(opp, "def")
+        special = _effective_stat(me, "spa") / _effective_stat(opp, "spd")
+    except (KeyError, ZeroDivisionError):
+        return "unknown"
+    return f"physical {physical:.2f}x, special {special:.2f}x"
+
+
 def _bench(team: dict[str, Pokemon], active: Pokemon | None) -> list[str]:
+    """Terse on purpose: the two bench lists are the largest thing in the state (~128 tokens together against a
+    384-token budget), and "status none" on a healthy Pokemon repeated ten times is the single cheapest thing to
+    cut. A fainted Pokemon needs no HP or status -- it has no decisions left in it."""
     out = []
     for mon in team.values():
         if mon is active:
             continue
-        state = "fainted" if mon.fainted else f"{_hp(mon)} hp, status {_status(mon)}"
-        out.append(f"{mon.species} ({_types(mon)}), {state}")
+        if mon.fainted:
+            out.append(f"{mon.species} fainted")
+            continue
+        status = "" if mon.status is None else f" {_status(mon)}"
+        out.append(f"{mon.species} {_types(mon)} {_hp(mon)}{status}")
     return out
 
 
@@ -86,53 +131,69 @@ def render_state(battle: Battle) -> dict[str, JSONContent]:
         "pokemon_remaining": f"us {alive_me}, opponent {alive_opp}",
         "our_active": _mon(me),
         "opponent_active": _mon(opp),
+        "speed": _speed_matchup(me, opp),
+        "offense": _offense(me, opp),
         "our_bench": _bench(battle.team, me) or ["none"],
         "opponent_revealed": _bench(battle.opponent_team, opp) or ["none"],
         "weather": ", ".join(w.name.lower() for w in battle.weather) or "none",
         "field": ", ".join(f.name.lower() for f in battle.fields) or "none",
         "our_side": ", ".join(s.name.lower() for s in battle.side_conditions) or "none",
         "opponent_side": ", ".join(s.name.lower() for s in battle.opponent_side_conditions) or "none",
-        "can_terastallize": f"yes, to {_tera_type(battle) or 'unknown type'}" if battle.can_tera else "no",
+        "can_terastallize": f"yes, to {_tera_display(battle)}" if battle.can_tera else "no",
     }
 
 
 # ---------------------------------------------------------------------------------------------------- options
 
-def _effectiveness(move: Move, target: Pokemon | None) -> float | None:
-    if target is None or move.category.name == "STATUS":
+def _effectiveness(type_or_move: PokemonType | Move, target: Pokemon | None) -> float | None:
+    if target is None:
         return None
     try:
-        return target.damage_multiplier(move)
+        return target.damage_multiplier(type_or_move)
     except (KeyError, AttributeError):  # exotic types (e.g. ???/Stellar) missing from the type chart lookup
         return None
 
 
-def _tera_type(battle: Battle) -> str | None:
+def _tera_type(battle: Battle) -> PokemonType | None:
     """Our active's tera type. poke-env does not always fill Pokemon.tera_type, so fall back to the raw request."""
     me = battle.active_pokemon
     if me is not None and me.tera_type is not None:
-        return me.tera_type.name.title()
+        return me.tera_type
     try:
         for p in battle.last_request["side"]["pokemon"]:
             if p.get("active") and p.get("teraType"):
-                return str(p["teraType"]).title()
-    except (KeyError, TypeError):  # last_request missing "side"/"pokemon", or not set yet (None)
+                return PokemonType.from_name(str(p["teraType"]))
+    except (KeyError, TypeError, ValueError):  # last_request missing "side"/"pokemon", not set yet, or an unknown type name
         pass
     return None
 
 
-def _move_desc(move: Move, battle: Battle, tera: bool, tera_type: str | None) -> str:
+def _tera_display(battle: Battle) -> str:
+    tera_type = _tera_type(battle)
+    return tera_type.name.title() if tera_type is not None else "unknown type"
+
+
+def _move_desc(move: Move, battle: Battle, tera: bool, tera_type: PokemonType | None) -> str:
     """`tera_type` is the battle's tera type for this turn, computed once by the caller (build_options) instead of
-    once per move here -- can_tera is turn-scoped, not move-scoped, so recomputing it per move was pure waste."""
+    once per move here -- can_tera is turn-scoped, not move-scoped, so recomputing it per move was pure waste.
+
+    Terastallizing changes two things this description has to respect, or the option text argues against the option:
+    Tera Blast becomes the tera type, and STAB is granted on the tera type *in addition to* the original types."""
     me, opp = battle.active_pokemon, battle.opponent_active_pokemon
-    parts = [move.type.name.title(), move.category.name.lower()]
+    teraing = tera and tera_type is not None
+    attack_type = tera_type if teraing and move.id == "terablast" and tera_type is not None else move.type
+    stab_types = {t for t in (me.types if me is not None else ()) if t is not None}
+    if teraing and tera_type is not None:
+        stab_types.add(tera_type)
+
+    parts = [attack_type.name.title(), move.category.name.lower()]
     if move.category.name != "STATUS":
         parts.append(f"power {move.base_power}")
         if opp is not None:
-            eff = _effectiveness(move, opp)
+            eff = _effectiveness(attack_type, opp)
             if eff is not None:
                 parts.append(f"{eff:g}x vs {opp.species}")
-        if me is not None and move.type in me.types:
+        if attack_type in stab_types:
             parts.append("STAB")
     acc = move.accuracy
     parts.append("never misses" if acc is True else f"accuracy {round(acc * 100)}%")
@@ -143,7 +204,7 @@ def _move_desc(move: Move, battle: Battle, tera: bool, tera_type: str | None) ->
     if move.self_switch:
         parts.append("switches user out")
     if tera:
-        parts.append(f"terastallize to {tera_type} first" if tera_type else "terastallize first")
+        parts.append(f"terastallize to {tera_type.name.title()} first" if tera_type else "terastallize first")
     return ", ".join(parts)
 
 
@@ -154,6 +215,9 @@ def _switch_desc(mon: Pokemon, battle: Battle) -> str:
         # worst-case damage multiplier the opponent's STAB types deal to this switch-in
         worst = max((mon.damage_multiplier(t) for t in opp.types if t is not None), default=1.0)
         parts.append(f"takes {worst:g}x from {opp.species}'s STAB types")
+        mine, theirs = _speed(mon), _speed(opp)
+        if mine is not None and theirs is not None:
+            parts.append("faster" if mine > theirs else "slower" if mine < theirs else "same speed")
     return ", ".join(parts)
 
 

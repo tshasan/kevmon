@@ -78,5 +78,9 @@ async def test_kev_player_completes_a_real_decision_against_the_live_server(batt
     player = KevPlayer(battle_format="gen9randombattle", kev_url=KEV_BASE_URL, max_concurrent_battles=1)
     order = await player.choose_move(battle)
     assert order is not None
-    assert player.n_decisions == 1
-    assert player.n_fallbacks == 0                                        # a real, healthy server must not fall back
+    stats = player.stats()
+    assert stats["decisions"] == 1
+    assert stats["fallbacks"] == 0                                        # a real, healthy server must not fall back
+    # a real model answering a real position spreads some probability around rather than collapsing onto one option
+    entropy = stats["mean_policy_entropy"]
+    assert isinstance(entropy, float) and 0.0 < entropy <= 1.0

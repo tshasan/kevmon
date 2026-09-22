@@ -30,6 +30,22 @@ def test_mon_has_a_fixed_shape_even_with_no_active_pokemon(battle_no_active: Bat
     our_active = state["our_active"]
     assert isinstance(our_active, dict)
     assert set(our_active) == {"species", "types", "hp", "status", "boosts", "terastallized"}
+    assert state["speed"] == "unknown" and state["offense"] == "unknown"
+
+
+def test_state_exposes_the_features_the_teacher_branches_on(battle: Battle) -> None:
+    """SimpleHeuristicsPlayer is a deterministic function of the position, and two of its inputs are invisible in a
+    types/HP-only rendering: the base-speed comparison in _estimate_matchup, and the atk/def vs spa/spd ratio that
+    decides physical or special. Without these the imitation ceiling sits below 100% for reasons no amount of
+    training data can fix, so they are rendered explicitly rather than left as arithmetic for a small model."""
+    state = render_state(battle)
+    speed, offense = state["speed"], state["offense"]
+    assert isinstance(speed, str) and isinstance(offense, str)
+    # garchomp (base spe 102) is faster than excadrill (base spe 88)
+    assert speed == "faster (102 vs 88)"
+    # garchomp's 130 atk into excadrill's 60 def beats its 80 spa into excadrill's 65 spd, by a wide margin
+    physical, special = (float(part.split()[1].rstrip("x")) for part in offense.split(", "))
+    assert offense.startswith("physical ") and physical > special
 
 
 def test_build_options_handles_a_forced_recharge_turn(battle_recharge: Battle) -> None:
@@ -40,6 +56,23 @@ def test_build_options_handles_a_forced_recharge_turn(battle_recharge: Battle) -
     options = build_options(battle_recharge)
     assert "switch to skarmory" in options
     assert not any("recharge" in key for key in options)
+
+
+def test_tera_options_describe_the_post_tera_move(battle_tera_changes_stab: Battle) -> None:
+    """An option's description has to describe the option, not the position before taking it. Terastallizing to Rock
+    grants Stone Edge STAB and turns Tera Blast from a neutral Normal move into a Rock one, which Excadrill
+    (Ground/Steel) resists twice over -- so the effectiveness has to be recomputed on the post-tera type too, not
+    just the STAB flag. A description written from the pre-tera types misstates both."""
+    options = build_options(battle_tera_changes_stab)
+
+    assert "STAB" not in options["use stoneedge"][1]
+    assert "STAB" in options["use stoneedge with tera"][1]
+
+    plain_blast, tera_blast = options["use terablast"][1], options["use terablast with tera"][1]
+    assert plain_blast.startswith("Normal") and "STAB" not in plain_blast
+    assert "0.5x vs excadrill" in plain_blast
+    assert tera_blast.startswith("Rock") and "STAB" in tera_blast
+    assert "0.25x vs excadrill" in tera_blast
 
 
 def test_build_options_keys_are_unique_and_legal(battle: Battle) -> None:

@@ -106,3 +106,31 @@ def _make_battle_recharge() -> Battle:
 @pytest.fixture
 def battle_recharge() -> Battle:
     return _make_battle_recharge()
+
+
+def _make_battle_tera_changes_stab() -> Battle:
+    """Our Garchomp (Ground/Dragon) can terastallize to Rock -- a type it does not already have. This is the case
+    that tells a correct tera description from a wrong one: Stone Edge is not STAB now but is STAB after the tera,
+    and Tera Blast stops being Normal and becomes Rock. The main `battle` fixture cannot catch either, because its
+    tera type (Ground) is one of Garchomp's own types and nothing about STAB changes."""
+    battle = Battle(battle_tag="battle-gen9randombattle-4", username="kevbot", logger=logging.getLogger("kev_showdown.tests"), gen=9)
+    moves = [
+        {"move": "Earthquake", "id": "earthquake", "pp": 16, "maxpp": 16, "target": "allAdjacent", "disabled": False},
+        {"move": "Stone Edge", "id": "stoneedge", "pp": 8, "maxpp": 8, "target": "normal", "disabled": False},
+        {"move": "Tera Blast", "id": "terablast", "pp": 16, "maxpp": 16, "target": "normal", "disabled": False},
+    ]
+    active = {**_OUR_SIDE["pokemon"][0], "moves": [m["id"] for m in moves], "teraType": "Rock"}
+    request: dict[str, Any] = {
+        "active": [{"moves": moves, "canTerastallize": "Rock"}],
+        "side": {**_OUR_SIDE, "pokemon": [active, _OUR_SIDE["pokemon"][1]]},
+        "rqid": 1,
+    }
+    battle.parse_request(request)
+    battle.parse_message(["", "switch", "p2a: Excadrill", "Excadrill, L50", "160/160"])
+    battle.parse_message(["", "turn", "5"])
+    return battle
+
+
+@pytest.fixture
+def battle_tera_changes_stab() -> Battle:
+    return _make_battle_tera_changes_stab()
