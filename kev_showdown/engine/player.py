@@ -33,9 +33,9 @@ MODES = ("perfect", "sampled", "naive")
 
 
 class MctsPlayer(Player):
-    def __init__(self, *args, mode: str = "sampled", iterations: int = 120_000, samples: int = 8,
-                 threads: int = 4, seed: int = 0, log_file: str | None = None, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args: object, mode: str = "sampled", iterations: int = 120_000, samples: int = 8,
+                 threads: int = 4, seed: int = 0, log_file: str | None = None, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.mode, self.iterations, self.samples, self.threads = mode, iterations, samples, threads
@@ -67,7 +67,7 @@ class MctsPlayer(Player):
         return [sample_opponent_team(battle, self.rng) for _ in range(self.samples)]
 
     # -- play ------------------------------------------------------------------------------------------------
-    def choose_move(self, battle: AbstractBattle) -> BattleOrder:  # type: ignore[override]
+    def choose_move(self, battle: AbstractBattle) -> BattleOrder:
         if not isinstance(battle, Battle):
             return self.choose_random_move(battle)
         options = build_options(battle)

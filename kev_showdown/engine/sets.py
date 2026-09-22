@@ -17,12 +17,27 @@ import json
 import random
 from functools import lru_cache
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 from poke_env.battle import Battle, Pokemon
 from poke_env.data import GenData
 
 from kev_showdown.engine.state import KnownSet
 from kev_showdown.engine.stats import final_stats, randbats_evs_ivs
+
+class RoleSet(TypedDict):
+    """One role in sets.json. `movepool` is longer than four; a real set draws four from it."""
+    role: str
+    movepool: list[str]
+    abilities: list[str]
+    teraTypes: NotRequired[list[str]]
+
+
+class SpeciesEntry(TypedDict):
+    """`level` is fixed per species by the generator, so it is never sampled."""
+    level: int
+    sets: list[RoleSet]
+
 
 DEFAULT_SETS_PATH = Path.home() / "dev" / "pokemon-showdown" / "data" / "random-battles" / "gen9" / "sets.json"
 PIVOT_MOVES = {"uturn", "flipturn", "voltswitch", "teleport", "partingshot", "chillyreception", "shedtail"}
@@ -34,13 +49,14 @@ def slug(name: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def load_sets(path: str = "") -> dict[str, dict]:
+def load_sets(path: str = "") -> dict[str, SpeciesEntry]:
     p = Path(path) if path else DEFAULT_SETS_PATH
     if not p.exists():
         raise FileNotFoundError(
             f"gen9 randbats set data not found at {p}. It lives in the pokemon-showdown checkout "
             f"(data/random-battles/gen9/sets.json); set KEVMON_SETS_PATH or pass a path explicitly.")
-    return json.loads(p.read_text(encoding="utf-8"))
+    data: dict[str, SpeciesEntry] = json.loads(p.read_text(encoding="utf-8"))
+    return data
 
 
 @lru_cache(maxsize=1)
@@ -98,11 +114,11 @@ def sample_set(species: str, rng: random.Random, observed: Pokemon | None = None
     pool = [slug(m) for m in role["movepool"]]
 
     seen_moves = [m for m in (observed.moves if observed else {})]
-    moves = list(dict.fromkeys(seen_moves))                      # revealed moves are pinned, never resampled
-    remaining = [m for m in pool if m not in moves]
+    picked = list(dict.fromkeys(seen_moves))                     # revealed moves are pinned, never resampled
+    remaining = [m for m in pool if m not in picked]
     rng.shuffle(remaining)
-    moves += remaining[: max(0, 4 - len(moves))]
-    moves = tuple(moves[:4])
+    picked += remaining[: max(0, 4 - len(picked))]
+    moves: tuple[str, ...] = tuple(picked[:4])
 
     ability = slug(observed.ability) if (observed and observed.ability) else slug(rng.choice(role["abilities"]))
     tera = (observed.tera_type.name.lower() if (observed and observed.tera_type is not None)
