@@ -13,6 +13,7 @@ kev_showdown/telemetry.py structured JSON-lines logging for every decision (late
 collect.py                 writes Kev training JSONL, split by battle: the teacher plays (cloning), or --dagger lets
                            the fine-tuned student play and the teacher label the positions it reaches
 preflight.py               free CPU-only check that every record fits Kev's context, BEFORE you rent a GPU
+train.sh                   launches the Modal fine-tune detached, so sleeping the laptop cannot kill the GPU run
 evaluate.py                Kev vs Random / MaxBasePower / SimpleHeuristics: win rates with intervals, latency, calibration
 tests/                      unit tests (real poke-env Battle fixtures, no live services) + `-m live` (real model, no mocks)
 ```
@@ -135,16 +136,58 @@ set it up yourself before running this. Everything here runs under the Modal app
 (`KEV_APP_NAME=pokebot`, exported once below); run names (`--name`) are immutable, so a retry needs a new suffix
 (`pokebot-v2`, ...).
 
+Use `./train.sh`, in this repo. It is the raw `modal run` below with the four things that actually decide whether
+a run survives the afternoon already set, and nothing else:
+
+```bash
+./train.sh launch pokebot-v6 data/pokebot-v2   # preflight, then launch detached and let go
+./train.sh logs pokebot-v6                     # follow the GPU log (Ctrl-C is safe -- it only stops the tail)
+./train.sh status                              # every pokebot app and its state
+./train.sh pull pokebot-v6                     # reports into ../kev/runs/<name>/ once it finishes
+./train.sh resume pokebot-v4                   # continue an interrupted run from its last checkpoint
+./train.sh cancel pokebot-v6                   # the only thing that stops a detached run
+```
+
+What it sets, and why each one is the difference between a finished run and a wasted H100 hour:
+
+- **`--detach`.** Without it the run dies the moment the local client disconnects — sleeping the laptop, dropping
+  wifi, or Ctrl-C at the wrong moment all cancel a GPU you are paying for. This is not hypothetical: `pokebot-v4`
+  and `pokebot-v5` both died exactly this way, at step 360 and step 10 of 3129, and the only trace is a
+  `Received a cancellation signal` line at the end of `modal app logs`. Modal prints this advice in the logs, after
+  it has already happened.
+- **`caffeinate -i` for the whole run, not just the launch.** Two separate things need it. The upload of the split
+  files and the handoff to Modal happen on this machine, and that window is the one place a sleep can still lose you
+  the *launch*. After that, caffeinate stays because it wraps the modal client, and the client is what streams
+  `logs/<name>.log` — let the Mac idle and the local log simply stops updating mid-run. So the launcher holds an
+  idle-sleep assertion for the full run (a 100-minute fine-tune means 100 minutes of held-open sleep) and says so at
+  launch, because an unexplained wide-awake laptop is its own kind of bug. `KEEP_AWAKE=0 ./train.sh launch ...` turns
+  it off; the run is equally safe, you just lose the live local log and read it back with `./train.sh logs` instead.
+  Closing the lid sleeps the Mac regardless, and that has always been fine — `--detach` is what protects the run.
+- **`--checkpoint-every 200`.** An interruption then costs minutes instead of the whole run: `resume` reads the
+  recipe back from the run's own `config.json` and finishes the checkpoint that run would have produced. A run that
+  dies before its first checkpoint (as `pokebot-v5` did, at step 10) has no `train_state.pt` and is simply gone.
+- **A name check before the upload.** Run names are immutable on the volume, so a reused name fails — and finding
+  that out *after* the upload wastes the launch.
+
+**A detached run looks dead from this machine, and mostly isn't.** It outlives every local process, so a closed
+terminal, a finished `tail`, a slept laptop and a killed client all look identical to a crash from here -- and none
+of them are one. Nothing local is evidence. `./train.sh status` asks Modal instead and prints `RUNNING on Modal` or
+`stopped` per run, with the app id and the last line of whatever local log exists (that line goes stale the moment
+the local streamer dies, which again says nothing about the run). `./train.sh logs <name>` reattaches to the live
+GPU log from Modal at any point, from any terminal, however the previous one ended.
+
+The reports are the one thing detaching costs you: the local client is what downloads them, so a detached run leaves
+them on the volume for `./train.sh pull`.
+
+Raw equivalent, if you want to see what it runs:
+
 ```bash
 # in ../kev
 export KEV_APP_NAME=pokebot
 modal run --detach skills/kev-finetune/scripts/kev_modal.py::train \
-  --data ../kevmon/data/pokebot-v2 --name pokebot-v4 --init-from jaredpalmer/kev-4b
+  --data ../kevmon/data/pokebot-v2 --name pokebot-v4 --init-from jaredpalmer/kev-4b \
+  --checkpoint-every 200 --eval-every 100
 ```
-
-**Use `--detach`.** Without it the run dies the moment the local client disconnects — closing the laptop, dropping
-wifi, or Ctrl-C at the wrong moment all kill a GPU you are paying for, and Modal prints exactly this advice in the
-logs after it has already happened.
 
 **Budget ~1.5-2 hours and $6-8, not 15 minutes.** At this data size (~25k records plus a 2,000-record replay slice)
 the fine-tune is ~2,100 optimizer steps at roughly 0.20s/record, which is about 80 minutes on an H100 at $3.95/hr,

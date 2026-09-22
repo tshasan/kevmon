@@ -7,3 +7,6 @@ __pycache__/
 data/
 replays/
 *.log.jsonl
+logs/
+.build/
+third_party/wheels/*.whl
