@@ -38,9 +38,13 @@ ignore_missing_imports = true
 module = "kev.*"                 # preflight.py runs under the sibling kev checkout's venv, not this one
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "poke_engine.*"         # compiled Rust extension; its bundled .pyi is stale and not a py.typed marker
+ignore_missing_imports = true
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["kev_showdown"]
+packages = ["kev_showdown", "kev_showdown.engine"]
