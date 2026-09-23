@@ -76,12 +76,15 @@ class MctsPlayer(Player):
         if len(options) == 1:
             return next(iter(options.values()))[0]           # forced: nothing to search
 
+        # Tell the engine which of our moves are actually choosable this turn, or it will return ones that
+        # Choice lock / Disable / Encore / no PP have removed and every such turn degrades to a random move.
+        legal = frozenset(o.order.id for o, _d in options.values() if hasattr(o.order, "id"))
         teams = self._teams(battle)
         per_search = max(1, self.iterations // max(1, len(teams)))
         votes: Counter[str] = Counter()
         try:
             for team in teams:
-                state = to_engine_state(battle, team)
+                state = to_engine_state(battle, team, legal_moves=legal)
                 result = pe.mcts(state, 0, per_search, self.threads)
                 self.total_iterations += result.iteration_count
                 for entry in result.s1:

@@ -113,11 +113,21 @@ def _item(mon: Pokemon) -> str:
     return "unknownitem" if mon.item == "unknown_item" else mon.item
 
 
-def _moves(mon: Pokemon) -> list[pe.Move]:
-    return [pe.Move(id=move_id, pp=move.current_pp) for move_id, move in list(mon.moves.items())[:4]]
+def _moves(mon: Pokemon, legal: frozenset[str] | None = None) -> list[pe.Move]:
+    """`legal` is the set of move ids poke-env says can be chosen RIGHT NOW. Anything else is marked disabled.
+
+    Without this the engine sees all four moves and happily returns one that Choice lock, Disable, Taunt, Encore or
+    exhausted PP has taken away. That choice then maps back to no legal order and the turn falls through to a random
+    move -- 3.0% of our decisions in the first foul-play head-to-head, every single fallback in that run.
+    """
+    out = []
+    for move_id, move in list(mon.moves.items())[:4]:
+        out.append(pe.Move(id=move_id, pp=move.current_pp,
+                           disabled=(legal is not None and move_id not in legal)))
+    return out
 
 
-def to_engine_pokemon(mon: Pokemon, *, known: bool) -> pe.Pokemon:
+def to_engine_pokemon(mon: Pokemon, *, known: bool, legal: frozenset[str] | None = None) -> pe.Pokemon:
     """`known=True` when poke-env has this Pokemon's real stats (always true for our own team, and for an
     opponent read out of their own `Player.battles[...]` in self-play). Otherwise stats are derived."""
     if known and mon.stats and mon.stats.get("atk") is not None:
@@ -138,7 +148,7 @@ def to_engine_pokemon(mon: Pokemon, *, known: bool) -> pe.Pokemon:
         ability=str(ability).replace(" ", "").lower(), item=_item(mon),
         attack=st["atk"], defense=st["def"], special_attack=st["spa"],
         special_defense=st["spd"], speed=st["spe"],
-        status=vocab.status(mon.status), moves=_moves(mon),
+        status=vocab.status(mon.status), moves=_moves(mon, legal),
         terastallized=bool(mon.is_terastallized),
         tera_type=(mon.tera_type.name.lower() if mon.tera_type is not None else "typeless"),
     )
@@ -169,8 +179,11 @@ def _ordered(team: dict[str, Pokemon], active: Pokemon | None) -> list[Pokemon]:
     return [chosen] + [m for m in mons if m is not chosen]
 
 
-def our_side(battle: Battle) -> pe.Side:
-    mons = [to_engine_pokemon(m, known=True) for m in _ordered(battle.team, battle.active_pokemon)]
+def our_side(battle: Battle, legal_moves: frozenset[str] | None = None) -> pe.Side:
+    """`legal_moves` constrains only the ACTIVE Pokemon; a benched mon's restrictions do not apply until it is in."""
+    ordered = _ordered(battle.team, battle.active_pokemon)
+    mons = [to_engine_pokemon(m, known=True, legal=(legal_moves if i == 0 else None))
+            for i, m in enumerate(ordered)]
     return _side(mons, True, _boosts(battle.active_pokemon), battle.side_conditions, battle.turn)
 
 
@@ -202,11 +215,12 @@ def opponent_side(battle: Battle, sets: dict[str, KnownSet] | None) -> pe.Side:
     return _side(mons, True, _boosts(active), battle.opponent_side_conditions, battle.turn)
 
 
-def to_engine_state(battle: Battle, opponent_sets: dict[str, KnownSet] | None = None) -> pe.State:
+def to_engine_state(battle: Battle, opponent_sets: dict[str, KnownSet] | None = None,
+                    legal_moves: frozenset[str] | None = None) -> pe.State:
     """The searchable state. `opponent_sets` is frozen static data (true, sampled, or naive); everything dynamic
     comes from `battle`, which is the only object here guaranteed to be describing the turn we were handed."""
     return pe.State(
-        side_one=our_side(battle),
+        side_one=our_side(battle, legal_moves),
         side_two=opponent_side(battle, opponent_sets),
         weather=vocab.weather(next(iter(battle.weather or {}), None)),
         terrain=vocab.terrain(battle.fields),
